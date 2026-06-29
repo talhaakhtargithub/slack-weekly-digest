@@ -13,6 +13,9 @@ GitHub Actions.
 - Uploads the combined digest as **one** file snippet (Slack splits long chat
   messages, so a file keeps it as a single item) using Slack's current
   `files.getUploadURLExternal` + `files.completeUploadExternal` flow.
+- **Retention:** after posting, deletes any weekly log file older than
+  `--max-age-days` (default **14 days**) so the channel keeps roughly the last
+  two weeks. Set `MAX_AGE_DAYS` in the workflow to change it.
 
 ## Setup
 
