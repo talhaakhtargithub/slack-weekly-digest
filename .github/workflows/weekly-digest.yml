@@ -1,10 +1,12 @@
 name: Weekly Slack Digest
 
-# Runs every Saturday at 02:00 Asia/Karachi (PKT, UTC+5) == 21:00 UTC Friday.
+# Runs every Saturday at 03:00 Asia/Karachi (PKT, UTC+5) == 22:00 UTC Friday.
+# Scheduled at the start of the desired 03:00-06:00 PKT window because GitHub
+# Actions cron can be delayed; starting at 03:00 keeps it inside the window.
 # GitHub Actions cron is always in UTC.
 on:
   schedule:
-    - cron: "0 21 * * 5"
+    - cron: "0 22 * * 5"
   workflow_dispatch:
     inputs:
       week_offset:

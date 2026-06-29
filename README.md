@@ -2,7 +2,7 @@
 
 Collects every **Monday–Friday** message from a source Slack channel and posts the
 whole week combined as a **single downloadable `.txt` file** into a destination
-channel. Runs automatically every **Saturday at 02:00 Asia/Karachi (PKT)** via
+channel. Runs automatically every **Saturday at 03:00 Asia/Karachi (PKT)** via
 GitHub Actions.
 
 ## What it does
@@ -45,7 +45,7 @@ The source and destination channel IDs are set in
 
 ## Schedule
 
-`0 21 * * 5` (UTC) = **Friday 21:00 UTC** = **Saturday 02:00 Asia/Karachi**.
+`0 22 * * 5` (UTC) = **Friday 22:00 UTC** = **Saturday 03:00 Asia/Karachi**.
 
 ## Run manually
 
