@@ -1,0 +1,49 @@
+name: Weekly Slack Digest
+
+# Runs every Saturday at 02:00 Asia/Karachi (PKT, UTC+5) == 21:00 UTC Friday.
+# GitHub Actions cron is always in UTC.
+on:
+  schedule:
+    - cron: "0 21 * * 5"
+  workflow_dispatch:
+    inputs:
+      week_offset:
+        description: "0 = current week (Mon-Fri just ended), 1 = previous week"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Post weekly digest to Slack
+        env:
+          SLACK_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SOURCE_CHANNEL: C0ASUA49PDY
+          DEST_CHANNEL: C0BDW158FKP
+          WEEK_OFFSET: ${{ github.event.inputs.week_offset || '0' }}
+        run: |
+          if [ -z "$SLACK_TOKEN" ]; then
+            echo "::error::SLACK_BOT_TOKEN secret is not set. Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          python3 slack_weekly_digest.py \
+            --source "$SOURCE_CHANNEL" \
+            --dest "$DEST_CHANNEL" \
+            --tz Asia/Karachi \
+            --week-offset "$WEEK_OFFSET"
