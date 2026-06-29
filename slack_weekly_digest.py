@@ -89,6 +89,33 @@ def upload_file_snippet(token, channel, content, filename, title, initial_commen
     return res
 
 
+def prune_old_digests(token, channel, keep):
+    """Keep only the `keep` most recent weekly-digest files in the channel,
+    deleting older ones so the channel doesn't get messy."""
+    cursor, items = None, []
+    while True:
+        params = {"channel": channel, "limit": 200}
+        if cursor:
+            params["cursor"] = cursor
+        r = call("conversations.history", token, params)
+        if not r.get("ok"):
+            break
+        for m in r.get("messages", []):
+            files = m.get("files") or []
+            if any((f.get("name", "").startswith("weekly-digest-")) for f in files):
+                items.append(m["ts"])
+        cursor = r.get("response_metadata", {}).get("next_cursor")
+        if not r.get("has_more") or not cursor:
+            break
+    items.sort(key=float, reverse=True)  # newest first
+    removed = 0
+    for ts in items[keep:]:
+        if call("chat.delete", token, {"channel": channel, "ts": ts}, post=True).get("ok"):
+            removed += 1
+        time.sleep(0.3)
+    return len(items), removed
+
+
 def fetch_history(channel, token, oldest, latest):
     """Fetch all top-level messages in [oldest, latest)."""
     msgs, cursor = [], None
@@ -136,6 +163,8 @@ def main():
     ap.add_argument("--dest", required=True)
     ap.add_argument("--tz", default=None)
     ap.add_argument("--week-offset", type=int, default=1)
+    ap.add_argument("--keep", type=int, default=2,
+                    help="how many recent weekly files to keep in the channel (0 = no pruning)")
     ap.add_argument("--include-threads", action="store_true", default=True)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -219,6 +248,13 @@ def main():
             title=f"Weekly digest {mon:%b %d}-{fri:%b %d} {mon:%Y}",
             initial_comment="")  # file only, no comment
         print(f"Uploaded digest as single snippet ({len(digest)} chars)", file=sys.stderr)
+
+    # Retention: keep only the N most recent weekly files in the channel.
+    if args.keep and args.keep > 0:
+        time.sleep(3)  # let the just-posted file propagate into channel history
+        total, removed = prune_old_digests(token, args.dest, args.keep)
+        print(f"Retention: {total} digest file(s) present, removed {removed} old one(s), "
+              f"keeping newest {args.keep}", file=sys.stderr)
     print("Done.", file=sys.stderr)
 
 
