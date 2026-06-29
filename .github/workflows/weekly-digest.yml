@@ -39,6 +39,8 @@ jobs:
           SOURCE_CHANNEL: C0ASUA49PDY
           DEST_CHANNEL: C0BDW158FKP
           WEEK_OFFSET: ${{ github.event.inputs.week_offset || '0' }}
+          # Keep only this many weekly logs in the channel (rolling 2-week window).
+          KEEP: "2"
         run: |
           if [ -z "$SLACK_TOKEN" ]; then
             echo "::error::SLACK_BOT_TOKEN secret is not set. Add it under Settings -> Secrets and variables -> Actions."
@@ -48,4 +50,5 @@ jobs:
             --source "$SOURCE_CHANNEL" \
             --dest "$DEST_CHANNEL" \
             --tz Asia/Karachi \
-            --week-offset "$WEEK_OFFSET"
+            --week-offset "$WEEK_OFFSET" \
+            --keep "$KEEP"
