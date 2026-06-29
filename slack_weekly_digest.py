@@ -89,9 +89,10 @@ def upload_file_snippet(token, channel, content, filename, title, initial_commen
     return res
 
 
-def prune_old_digests(token, channel, keep):
-    """Keep only the `keep` most recent weekly-digest files in the channel,
-    deleting older ones so the channel doesn't get messy."""
+def prune_old_digests(token, channel, keep=0, max_age_days=0):
+    """Prune old weekly-digest files so the channel stays tidy. A file is
+    deleted if it is older than `max_age_days` (when > 0) OR if it falls
+    outside the `keep` most recent files (when > 0)."""
     cursor, items = None, []
     while True:
         params = {"channel": channel, "limit": 200}
@@ -108,8 +109,15 @@ def prune_old_digests(token, channel, keep):
         if not r.get("has_more") or not cursor:
             break
     items.sort(key=float, reverse=True)  # newest first
+    cutoff = time.time() - max_age_days * 86400 if max_age_days else None
+    to_delete = []
+    for i, ts in enumerate(items):
+        too_old = cutoff is not None and float(ts) < cutoff
+        beyond_keep = keep > 0 and i >= keep
+        if too_old or beyond_keep:
+            to_delete.append(ts)
     removed = 0
-    for ts in items[keep:]:
+    for ts in to_delete:
         if call("chat.delete", token, {"channel": channel, "ts": ts}, post=True).get("ok"):
             removed += 1
         time.sleep(0.3)
@@ -163,8 +171,10 @@ def main():
     ap.add_argument("--dest", required=True)
     ap.add_argument("--tz", default=None)
     ap.add_argument("--week-offset", type=int, default=1)
-    ap.add_argument("--keep", type=int, default=2,
-                    help="how many recent weekly files to keep in the channel (0 = no pruning)")
+    ap.add_argument("--keep", type=int, default=0,
+                    help="keep only the N most recent weekly files (0 = no count limit)")
+    ap.add_argument("--max-age-days", type=int, default=14,
+                    help="delete weekly files older than this many days (0 = disabled)")
     ap.add_argument("--include-threads", action="store_true", default=True)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -249,12 +259,19 @@ def main():
             initial_comment="")  # file only, no comment
         print(f"Uploaded digest as single snippet ({len(digest)} chars)", file=sys.stderr)
 
-    # Retention: keep only the N most recent weekly files in the channel.
-    if args.keep and args.keep > 0:
+    # Retention: delete weekly files older than --max-age-days (and/or beyond
+    # the --keep most recent), so the channel stays tidy.
+    if (args.max_age_days and args.max_age_days > 0) or (args.keep and args.keep > 0):
         time.sleep(3)  # let the just-posted file propagate into channel history
-        total, removed = prune_old_digests(token, args.dest, args.keep)
-        print(f"Retention: {total} digest file(s) present, removed {removed} old one(s), "
-              f"keeping newest {args.keep}", file=sys.stderr)
+        total, removed = prune_old_digests(token, args.dest,
+                                           keep=args.keep, max_age_days=args.max_age_days)
+        rule = []
+        if args.max_age_days > 0:
+            rule.append(f"older than {args.max_age_days} days")
+        if args.keep > 0:
+            rule.append(f"beyond newest {args.keep}")
+        print(f"Retention: {total} digest file(s) present, removed {removed} "
+              f"({' or '.join(rule)})", file=sys.stderr)
     print("Done.", file=sys.stderr)
 
 
