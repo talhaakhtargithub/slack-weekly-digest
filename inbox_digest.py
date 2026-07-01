@@ -80,6 +80,59 @@ def classify(frm, subj):
     return "REPLY"          # real human / application response
 
 
+# Triage (aggressive rule, per user 2026-07-01): mark "useless" mail read, keep real
+# leads unread. Useless = bounces, auto/notification mail, and any reply the NVIDIA
+# LLM labels newsletter/auto-reply/ticket-ack/other/rejected. Kept unread (important):
+# interested, meeting-request, needs-info. Unenriched replies are left unread (safe).
+USELESS_INTENTS = {"newsletter", "auto-reply", "ticket-ack", "other", "rejected"}
+
+
+def is_useless(kind, intent):
+    if kind in ("AUTO", "BOUNCE"):
+        return True
+    if kind == "REPLY" and intent:            # only act once the LLM has judged it
+        return intent in USELESS_INTENTS
+    return False                              # unenriched reply -> keep unread
+
+
+def triage_mark_read(creds, rows, enrich, uids):
+    """Mark useless messages \\Seen (read) across accounts; leave important unread."""
+    by_acct = {}
+    for r in rows:
+        intent = enrich.get(id(r), ("", ""))[0]
+        if is_useless(r[4], intent):
+            uid = uids.get(id(r))
+            if uid:
+                by_acct.setdefault(r[1], []).append(uid)
+    if not by_acct:
+        return "triage: nothing to mark (no useless mail)"
+    total, errs = 0, []
+    for acct, uidlist in by_acct.items():
+        pw = creds.get(acct)
+        if not pw:
+            continue
+        M = None
+        try:
+            M = imaplib.IMAP4_SSL("imap.gmail.com", 993, timeout=30)
+            M.login(acct, pw)
+            M.select("INBOX")                              # read-write (not readonly)
+            for j in range(0, len(uidlist), 200):          # batch to keep commands short
+                M.uid("store", ",".join(uidlist[j:j + 200]), "+FLAGS", "(\\Seen)")
+            total += len(uidlist)
+        except Exception as e:
+            errs.append(f"{acct.split('@')[0]}: {str(e)[:40]}")
+        finally:
+            try:
+                M.logout()
+            except Exception:
+                pass
+    msg = (f"triage: marked {total} useless email(s) read across {len(by_acct)} "
+           f"account(s); important kept unread")
+    if errs:
+        msg += " | errors: " + "; ".join(errs)
+    return msg
+
+
 def _body_text(msg, limit=1500):
     """Plain-text body of a message, truncated."""
     parts = []
@@ -104,6 +157,7 @@ def _body_text(msg, limit=1500):
 def fetch_account(acct, pw, since_dt, want_bodies=False):
     imap_since = since_dt.strftime("%d-%b-%Y")
     out = []
+    uids = {}                     # id(row) -> IMAP UID, for optional triage marking
     # connect + login with retries (IMAP/Gmail occasionally drops connections)
     M = None
     last = None
@@ -123,9 +177,10 @@ def fetch_account(acct, pw, since_dt, want_bodies=False):
     if M is None:
         raise last if last else RuntimeError("imap connect failed")
     M.select("INBOX")
-    typ, data = M.search(None, f'(SINCE {imap_since})')
+    # UID-based so triage can reliably mark the same messages read later
+    typ, data = M.uid("search", None, f'(SINCE {imap_since})')
     for i in data[0].split():
-        typ, md = M.fetch(i, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+        typ, md = M.uid("fetch", i, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
         if not md or not md[0]:
             continue
         msg = email.message_from_bytes(md[0][1])
@@ -141,14 +196,16 @@ def fetch_account(acct, pw, since_dt, want_bodies=False):
         body = ""
         if want_bodies and kind == "REPLY":
             try:
-                typ, fd = M.fetch(i, "(BODY.PEEK[])")
+                typ, fd = M.uid("fetch", i, "(BODY.PEEK[])")
                 if fd and fd[0]:
                     body = _body_text(email.message_from_bytes(fd[0][1]))
             except Exception:
                 pass
-        out.append([dt, acct, frm, subj, kind, body])
+        row = [dt, acct, frm, subj, kind, body]
+        out.append(row)
+        uids[id(row)] = i.decode() if isinstance(i, bytes) else str(i)
     M.logout()
-    return out
+    return out, uids
 
 
 INTENTS = ("interested", "meeting-request", "needs-info", "rejected",
@@ -496,16 +553,21 @@ def main():
                     help="post the digest to Slack via bot token (SLACK_BOT_TOKEN + SLACK_CHANNEL)")
     ap.add_argument("--email", action="store_true",
                     help="email the digest to DIGEST_EMAIL_TO")
+    ap.add_argument("--triage", action="store_true",
+                    help="mark useless mail read (bounces/auto/newsletter/other/rejected), "
+                         "keep real leads unread (interested/meeting-request/needs-info)")
     args = ap.parse_args()
 
     creds = load_accounts()
     llm_on = bool(os.environ.get("NVIDIA_API_KEY", "").strip())
     generated = datetime.now(timezone.utc)
     since_dt = generated - timedelta(days=args.days)
-    rows, skipped, failed = [], [], []
+    rows, skipped, failed, uids = [], [], [], {}
     for acct, pw in creds.items():
         try:
-            rows.extend(fetch_account(acct, pw, since_dt, want_bodies=llm_on))
+            r, u = fetch_account(acct, pw, since_dt, want_bodies=llm_on)
+            rows.extend(r)
+            uids.update(u)
         except Exception as e:
             failed.append(f"{acct}: {str(e)[:60]}")
 
@@ -578,6 +640,8 @@ def main():
     if args.email:
         html = build_html(creds, rows, show, enrich, failed, args, generated)
         print(send_email(report, html))
+    if args.triage:
+        print(triage_mark_read(creds, rows, enrich, uids))
 
 
 if __name__ == "__main__":
