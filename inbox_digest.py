@@ -26,7 +26,6 @@ import imaplib
 import email
 import urllib.request
 import urllib.error
-import urllib.parse
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime, parseaddr
 from pathlib import Path
@@ -213,46 +212,6 @@ def llm_enrich(frm, subj, body):
     return "other", f"(llm unavailable: {last_err})"
 
 
-def send_telegram(report, log_path=None):
-    """Push the digest to Telegram (text + optional full-log file attachment).
-
-    Gated on TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env. Returns a status string.
-    """
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat:
-        return "telegram: skipped (no token/chat id)"
-    base = f"https://api.telegram.org/bot{token}"
-
-    # Text message = everything above the per-message list (summary + intents), <4096.
-    head = report.split("## Messages", 1)[0].strip()
-    msg = ("📬 *Inbox digest*\n```\n" + head[:3500] + "\n```")
-    try:
-        data = urllib.parse.urlencode({
-            "chat_id": chat, "text": msg, "parse_mode": "Markdown",
-            "disable_web_page_preview": "true"}).encode()
-        urllib.request.urlopen(urllib.request.Request(base + "/sendMessage", data=data), timeout=30).read()
-    except Exception as e:
-        return f"telegram: sendMessage failed ({str(e)[:60]})"
-
-    # Full log as a document so nothing is truncated.
-    if log_path and Path(log_path).exists():
-        try:
-            boundary = "----digest" + datetime.now().strftime("%H%M%S")
-            content = Path(log_path).read_bytes()
-            body = b""
-            body += f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat}\r\n".encode()
-            body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; "
-                     f"filename=\"{Path(log_path).name}\"\r\nContent-Type: text/plain\r\n\r\n").encode()
-            body += content + f"\r\n--{boundary}--\r\n".encode()
-            req = urllib.request.Request(base + "/sendDocument", data=body,
-                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
-            urllib.request.urlopen(req, timeout=45).read()
-        except Exception as e:
-            return f"telegram: text ok, document failed ({str(e)[:50]})"
-    return "telegram: sent"
-
-
 def _chunk_lines(report, limit=3600):
     chunks, cur = [], ""
     for line in report.splitlines():
@@ -359,8 +318,6 @@ def main():
     ap.add_argument("--save", action="store_true")
     ap.add_argument("--llm-limit", type=int, default=40,
                     help="max replies to summarize with the LLM per run")
-    ap.add_argument("--telegram", action="store_true",
-                    help="push the digest to Telegram (needs TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID)")
     ap.add_argument("--slack-bot", action="store_true",
                     help="post the digest to Slack via bot token (SLACK_BOT_TOKEN + SLACK_CHANNEL)")
     ap.add_argument("--email", action="store_true",
@@ -430,7 +387,7 @@ def main():
     print(report)
 
     log_file = None
-    if args.save or args.telegram:
+    if args.save:
         logdir = ROOT / "logs"
         logdir.mkdir(exist_ok=True)
         log_file = logdir / f"inbox_{datetime.now(timezone.utc):%Y-%m-%d}.txt"
@@ -438,8 +395,6 @@ def main():
         if args.save:
             print(f"\n[saved] {log_file}")
 
-    if args.telegram:
-        print(send_telegram(report, log_file))
     if args.slack_bot:
         print(send_slack_bot(report))
     if args.email:
