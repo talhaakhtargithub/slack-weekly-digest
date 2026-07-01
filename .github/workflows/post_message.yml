@@ -1,0 +1,30 @@
+name: Post Message
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Slack channel ID'
+        required: true
+      text:
+        description: 'Message text'
+        required: true
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post to Slack
+        env:
+          SLACK_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          CH: ${{ github.event.inputs.channel }}
+          TXT: ${{ github.event.inputs.text }}
+        run: |
+          resp=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_TOKEN" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data "$(jq -nc --arg ch "$CH" --arg t "$TXT" '{channel:$ch, text:$t, mrkdwn:true}')")
+          echo "response: $resp"
+          echo "$resp" | jq -e '.ok == true' >/dev/null || { echo "::error::Slack: $(echo "$resp" | jq -r '.error // "unknown"')"; exit 1; }
+          echo "posted OK"
