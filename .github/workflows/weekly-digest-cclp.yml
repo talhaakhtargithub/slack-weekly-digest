@@ -1,0 +1,53 @@
+name: Weekly Slack Digest (John CCLP)
+
+# Same as the main weekly digest, but for the "John Clendenning | Team Rozi"
+# workspace. Runs every Saturday at 03:00 Asia/Karachi (PKT, UTC+5) == 22:00 UTC
+# Friday. GitHub Actions cron is always in UTC.
+on:
+  schedule:
+    - cron: "0 22 * * 5"
+  workflow_dispatch:
+    inputs:
+      week_offset:
+        description: "0 = current week (Mon-Fri just ended), 1 = previous week"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-digest-cclp
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Post weekly digest to Slack
+        env:
+          SLACK_TOKEN: ${{ secrets.SLACK_BOT_TOKEN_CCLP }}
+          SOURCE_CHANNEL: C06LW92JWEL
+          DEST_CHANNEL: C0BE0F13RN3
+          WEEK_OFFSET: ${{ github.event.inputs.week_offset || '0' }}
+          # Delete weekly logs older than this many days (rolling 14-day / ~2-week window).
+          MAX_AGE_DAYS: "14"
+        run: |
+          if [ -z "$SLACK_TOKEN" ]; then
+            echo "::error::SLACK_BOT_TOKEN_CCLP secret is not set. Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          python3 slack_weekly_digest.py \
+            --source "$SOURCE_CHANNEL" \
+            --dest "$DEST_CHANNEL" \
+            --tz Asia/Karachi \
+            --week-offset "$WEEK_OFFSET" \
+            --max-age-days "$MAX_AGE_DAYS"
