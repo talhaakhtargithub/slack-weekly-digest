@@ -177,6 +177,9 @@ def main():
                     help="delete weekly files older than this many days (0 = disabled)")
     ap.add_argument("--include-threads", action="store_true", default=True)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--all", action="store_true",
+                    help="dump the ENTIRE channel history (ignores the Mon-Fri week "
+                         "window) and print it; implies --dry-run, never posts")
     args = ap.parse_args()
 
     token = os.environ.get("SLACK_TOKEN")
@@ -184,6 +187,36 @@ def main():
         sys.exit("Set SLACK_TOKEN env var")
 
     tz = ZoneInfo(args.tz) if args.tz else datetime.datetime.now().astimezone().tzinfo
+
+    if args.all:
+        # Full-history dump: page from the beginning of time to now.
+        oldest, latest = 1.0, time.time() + 86400
+        print(f"Dumping ALL history from <#{args.source}>  [{tz}]", file=sys.stderr)
+        msgs = fetch_history(args.source, token, oldest, latest)
+        msgs = [m for m in msgs if m.get("type") == "message"
+                and m.get("subtype") not in ("channel_join", "channel_leave")]
+        if args.include_threads:
+            expanded = []
+            for m in msgs:
+                expanded.append(m)
+                if int(m.get("reply_count", 0)) > 0:
+                    for r in fetch_replies(args.source, token, m["ts"]):
+                        r["_reply"] = True
+                        expanded.append(r)
+            expanded.sort(key=lambda m: float(m["ts"]))
+            msgs = expanded
+        cur_day = None
+        for m in msgs:
+            when, who, text = fmt(m, token, tz)
+            day_key = " ".join(when.split()[0:2])
+            if day_key != cur_day:
+                print(f"\n— {day_key} —")
+                cur_day = day_key
+            t = when.split()[-1]
+            prefix = "    ↳ " if m.get("_reply") else "• "
+            print(f"{prefix}{t} {who}: {text}")
+        print(f"\n[--all] {len(msgs)} messages total", file=sys.stderr)
+        return
 
     today = datetime.datetime.now(tz).date()
     this_mon = today - datetime.timedelta(days=today.weekday())
