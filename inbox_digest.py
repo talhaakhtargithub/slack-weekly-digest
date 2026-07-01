@@ -223,21 +223,21 @@ def _chunk_lines(report, limit=3600):
     return chunks
 
 
-def send_slack_bot(report):
-    """Push the digest to Slack via a bot token (SLACK_BOT_TOKEN + SLACK_CHANNEL).
+def send_slack_bot(blocks_messages, fallback_text="Inbox digest"):
+    """Post the digest to Slack as Block Kit cards via chat.postMessage.
 
-    Posts in <=3600-char code-block chunks via chat.postMessage. Returns status.
+    Accepts a list of messages, each a list of Block Kit blocks (<=50 per message).
+    Channel from SLACK_CHANNEL or DIGEST_SLACK_CHANNEL. Retries transient failures.
     """
     token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
-    channel = os.environ.get("SLACK_CHANNEL", "").strip()
+    channel = (os.environ.get("SLACK_CHANNEL", "").strip()
+               or os.environ.get("DIGEST_SLACK_CHANNEL", "").strip())
     if not token or not channel:
         return "slack-bot: skipped (no token/channel)"
-    chunks = _chunk_lines(report)
     sent = 0
-    for idx, ch in enumerate(chunks):
-        prefix = "📬 *Inbox digest*\n" if idx == 0 else f"_(cont. {idx+1}/{len(chunks)})_\n"
-        payload = json.dumps({"channel": channel, "text": prefix + "```\n" + ch + "```",
-                              "mrkdwn": True}).encode()
+    for idx, blocks in enumerate(blocks_messages):
+        payload = json.dumps({"channel": channel, "blocks": blocks,
+                              "text": fallback_text}).encode()
         err = None
         for attempt in range(3):                   # retry transient failures
             req = urllib.request.Request("https://slack.com/api/chat.postMessage", data=payload,
@@ -253,11 +253,12 @@ def send_slack_bot(report):
                 if err in ("channel_not_found", "not_in_channel", "invalid_auth", "not_authed"):
                     return f"slack-bot: error '{err}' after {sent} ok"
             except Exception as e:
-                err = str(e)[:50]
+                err = str(e)[:80]
             time.sleep(min(2 ** attempt, 8))
         if err:
-            return f"slack-bot: chunk {idx+1} failed after {sent} ok ({err})"
+            return f"slack-bot: message {idx+1} failed after {sent} ok ({err})"
         sent += 1
+        time.sleep(1)                              # gentle pacing between posts
     return f"slack-bot: sent ({sent} message(s))"
 
 
@@ -280,7 +281,174 @@ def send_slack(report):
     return f"slack: sent ({sent} message(s))"
 
 
-def send_email(report):
+INTENT_STYLE = {
+    "interested":      ("#0a7d33", "#e5f6ea"),
+    "meeting-request": ("#0a6b7d", "#e0f4f7"),
+    "needs-info":      ("#1155cc", "#e8f0fe"),
+    "rejected":        ("#b3261e", "#fce8e6"),
+    "auto-reply":      ("#5f6368", "#f1f3f4"),
+    "ticket-ack":      ("#5f6368", "#f1f3f4"),
+    "newsletter":      ("#8a5a00", "#fef7e0"),
+    "other":           ("#5f6368", "#f1f3f4"),
+}
+KIND_STYLE = {"REPLY": ("#0a7d33", "#e5f6ea"), "BOUNCE": ("#b3261e", "#fce8e6"),
+              "AUTO": ("#5f6368", "#f1f3f4")}
+
+# colored-dot / emoji per intent for Slack Block Kit cards
+INTENT_EMOJI = {
+    "interested": "🟢", "meeting-request": "🗓️", "needs-info": "🔵",
+    "rejected": "🔴", "auto-reply": "⚪", "ticket-ack": "🎫",
+    "newsletter": "📰", "other": "⚫",
+}
+
+
+def _esc(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _pill(text, colors):
+    fg, bg = colors
+    return (f'<span style="background:{bg};color:{fg};padding:2px 9px;border-radius:11px;'
+            f'font-size:12px;font-weight:600;white-space:nowrap">{_esc(text)}</span>')
+
+
+def build_html(creds, rows, show, enrich, failed, args, generated):
+    by_acct = {}
+    for dt, acct, frm, subj, kind, body in rows:
+        d = by_acct.setdefault(acct, {"REPLY": 0, "BOUNCE": 0, "AUTO": 0})
+        d[kind] += 1
+    by_intent = {}
+    for intent, _ in enrich.values():
+        by_intent[intent] = by_intent.get(intent, 0) + 1
+    tot_reply = sum(d["REPLY"] for d in by_acct.values())
+    tot_bounce = sum(d["BOUNCE"] for d in by_acct.values())
+
+    css_td = "padding:7px 10px;border-bottom:1px solid #eee;font-size:13px;vertical-align:top;"
+    css_th = "padding:7px 10px;text-align:left;font-size:12px;color:#666;text-transform:uppercase;letter-spacing:.03em;border-bottom:2px solid #e0e0e0;"
+    h = []
+    h.append('<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'
+             'max-width:720px;margin:0 auto;color:#202124;">')
+    h.append('<div style="background:#1a73e8;color:#fff;padding:16px 20px;border-radius:10px 10px 0 0;">'
+             '<div style="font-size:20px;font-weight:700;">📬 Inbox Digest</div>'
+             f'<div style="font-size:13px;opacity:.9;margin-top:2px;">last {args.days} day(s) · '
+             f'generated {generated:%Y-%m-%d %H:%M UTC}</div></div>')
+    # overview cards
+    h.append('<div style="display:flex;gap:10px;padding:16px 20px 4px;flex-wrap:wrap;">')
+    for label, val, col in [("Accounts", len(creds), "#1a73e8"), ("Messages", len(rows), "#5f6368"),
+                            ("Replies", tot_reply, "#0a7d33"), ("Bounces", tot_bounce, "#b3261e")]:
+        h.append(f'<div style="flex:1;min-width:110px;background:#f8f9fa;border:1px solid #eee;'
+                 f'border-radius:8px;padding:10px 12px;"><div style="font-size:22px;font-weight:700;'
+                 f'color:{col};">{val}</div><div style="font-size:12px;color:#666;">{label}</div></div>')
+    h.append('</div>')
+    # intent badges
+    if by_intent:
+        h.append('<div style="padding:10px 20px 0;"><div style="font-size:13px;color:#666;margin-bottom:6px;">'
+                 'Reply intents</div><div style="line-height:2.1;">')
+        for intent, n in sorted(by_intent.items(), key=lambda x: -x[1]):
+            h.append(_pill(f"{intent} · {n}", INTENT_STYLE.get(intent, INTENT_STYLE["other"])) + " ")
+        h.append('</div></div>')
+    # per-account table
+    h.append('<div style="padding:16px 20px 0;"><div style="font-size:13px;color:#666;margin-bottom:6px;">'
+             'Per account</div><table style="width:100%;border-collapse:collapse;">')
+    h.append(f'<tr><th style="{css_th}">Account</th><th style="{css_th}">Replies</th>'
+             f'<th style="{css_th}">Bounces</th><th style="{css_th}">Auto</th></tr>')
+    for acct in sorted(creds):
+        d = by_acct.get(acct, {"REPLY": 0, "BOUNCE": 0, "AUTO": 0})
+        h.append(f'<tr><td style="{css_td}">{_esc(acct)}</td><td style="{css_td}"><b>{d["REPLY"]}</b></td>'
+                 f'<td style="{css_td}">{d["BOUNCE"]}</td><td style="{css_td}">{d["AUTO"]}</td></tr>')
+    h.append('</table></div>')
+    # messages table
+    h.append('<div style="padding:16px 20px 4px;"><div style="font-size:13px;color:#666;margin-bottom:6px;">'
+             f'{"Replies" if args.replies_only else "Messages"}</div>'
+             '<table style="width:100%;border-collapse:collapse;">')
+    h.append(f'<tr><th style="{css_th}">When</th><th style="{css_th}">From</th>'
+             f'<th style="{css_th}">Subject / summary</th><th style="{css_th}">Intent</th></tr>')
+    for r in show:
+        dt, acct, frm, subj, kind, body = r
+        intent, summ = enrich.get(id(r), ("", ""))
+        pill = _pill(intent, INTENT_STYLE.get(intent, INTENT_STYLE["other"])) if intent else _pill(kind, KIND_STYLE.get(kind, KIND_STYLE["AUTO"]))
+        summ_html = f'<div style="color:#555;font-size:12px;margin-top:3px;">↳ {_esc(summ)}</div>' if summ else ''
+        h.append(f'<tr><td style="{css_td}white-space:nowrap;color:#666;">{dt:%m-%d %H:%M}</td>'
+                 f'<td style="{css_td}">{_esc(frm)}<div style="color:#999;font-size:11px;">{_esc(acct.split("@")[0])}</div></td>'
+                 f'<td style="{css_td}">{_esc(subj[:80])}{summ_html}</td>'
+                 f'<td style="{css_td}">{pill}</td></tr>')
+    h.append('</table></div>')
+    if failed:
+        h.append(f'<div style="padding:8px 20px;color:#b3261e;font-size:12px;">⚠ read issues: {_esc("; ".join(failed))}</div>')
+    h.append('<div style="padding:12px 20px 18px;color:#999;font-size:11px;border-top:1px solid #eee;">'
+             'Automated inbox digest · summaries + intent by NVIDIA LLM · read-only</div>')
+    h.append('</div>')
+    return "".join(h)
+
+
+def _slack_section(text):
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text[:2900]}}
+
+
+def build_slack_blocks(creds, rows, show, enrich, failed, args, generated):
+    """Build rich Block Kit messages: header + per-account summary + one card per
+    NVIDIA-summarized reply. Returns a list of messages (each <=50 blocks)."""
+    by_acct = {}
+    for dt, acct, frm, subj, kind, body in rows:
+        d = by_acct.setdefault(acct, {"REPLY": 0, "BOUNCE": 0, "AUTO": 0})
+        d[kind] += 1
+    by_intent = {}
+    for intent, _ in enrich.values():
+        by_intent[intent] = by_intent.get(intent, 0) + 1
+    tot_reply = sum(d["REPLY"] for d in by_acct.values())
+    tot_bounce = sum(d["BOUNCE"] for d in by_acct.values())
+    tot_auto = sum(d["AUTO"] for d in by_acct.values())
+
+    header = []
+    header.append({"type": "header", "text": {"type": "plain_text",
+        "text": f"📬 Inbox Digest — {generated:%b %d}", "emoji": True}})
+    header.append({"type": "context", "elements": [{"type": "mrkdwn",
+        "text": (f"*{len(creds)}* accounts · *{len(rows)}* messages · *{tot_reply}* replies"
+                 f" · *{tot_bounce}* bounces · *{tot_auto}* auto · last {args.days}d"
+                 f" · {generated:%Y-%m-%d %H:%M UTC}")}]})
+    if by_intent:
+        parts = [f"{INTENT_EMOJI.get(k, '⚫')} {k} · *{v}*"
+                 for k, v in sorted(by_intent.items(), key=lambda x: -x[1])]
+        header.append({"type": "context", "elements": [{"type": "mrkdwn",
+            "text": "   ".join(parts)}]})
+    acct_lines = []
+    for acct in sorted(creds):
+        d = by_acct.get(acct, {"REPLY": 0, "BOUNCE": 0, "AUTO": 0})
+        if not any(d.values()):
+            continue
+        acct_lines.append(f"• *{acct.split('@')[0]}* — {d['REPLY']} repl · "
+                          f"{d['BOUNCE']} bnc · {d['AUTO']} auto")
+    if acct_lines:
+        header.append(_slack_section("*Per account*\n" + "\n".join(acct_lines)))
+    header.append({"type": "divider"})
+
+    # one card per LLM-summarized reply (colored by intent)
+    cards = []
+    for r in show:
+        dt, acct, frm, subj, kind, body = r
+        intent, summ = enrich.get(id(r), ("", ""))
+        if not intent:
+            continue
+        emoji = INTENT_EMOJI.get(intent, "⚫")
+        cards.append(_slack_section(
+            f"{emoji} *{intent.upper()}*  ·  _{acct.split('@')[0]}_  ·  {dt:%m-%d %H:%M}\n"
+            f"*{_esc(frm)}*  ·  {_esc(subj[:70])}\n{_esc(summ)}"))
+    if not cards:
+        cards.append(_slack_section("_No replies to summarize in this window._"))
+    if failed:
+        cards.append({"type": "context", "elements": [{"type": "mrkdwn",
+            "text": "⚠ read issues: " + _esc("; ".join(failed))[:900]}]})
+
+    # split across messages (Slack caps 50 blocks/message)
+    MAX = 45
+    messages = [header + cards[:MAX - len(header)]]
+    rest = cards[MAX - len(header):]
+    for i in range(0, len(rest), MAX):
+        messages.append(rest[i:i + MAX])
+    return messages
+
+
+def send_email(report, html_report=None):
     """Email the digest to DIGEST_EMAIL_TO, sent from the first digest account's SMTP."""
     to = os.environ.get("DIGEST_EMAIL_TO", "").strip()
     if not to:
@@ -291,7 +459,13 @@ def send_email(report):
     sender, pw = next(iter(creds.items()))
     import smtplib
     from email.mime.text import MIMEText
-    msg = MIMEText(report, _charset="utf-8")
+    from email.mime.multipart import MIMEMultipart
+    if html_report:
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(report, "plain", "utf-8"))
+        msg.attach(MIMEText(html_report, "html", "utf-8"))
+    else:
+        msg = MIMEText(report, _charset="utf-8")
     msg["Subject"] = f"📬 Inbox digest — {datetime.now(timezone.utc):%Y-%m-%d}"
     msg["From"] = sender
     msg["To"] = to
@@ -326,7 +500,8 @@ def main():
 
     creds = load_accounts()
     llm_on = bool(os.environ.get("NVIDIA_API_KEY", "").strip())
-    since_dt = datetime.now(timezone.utc) - timedelta(days=args.days)
+    generated = datetime.now(timezone.utc)
+    since_dt = generated - timedelta(days=args.days)
     rows, skipped, failed = [], [], []
     for acct, pw in creds.items():
         try:
@@ -344,7 +519,7 @@ def main():
             dt, acct, frm, subj, kind, body = r
             enrich[id(r)] = llm_enrich(frm, subj, body)
     lines = []
-    lines.append(f"# Inbox digest — last {args.days} day(s), generated {datetime.now(timezone.utc):%Y-%m-%d %H:%M UTC}")
+    lines.append(f"# Inbox digest — last {args.days} day(s), generated {generated:%Y-%m-%d %H:%M UTC}")
     lines.append(f"# accounts read: {len(creds)}   messages: {len(rows)}")
     lines.append("")
 
@@ -396,9 +571,13 @@ def main():
             print(f"\n[saved] {log_file}")
 
     if args.slack_bot:
-        print(send_slack_bot(report))
+        blocks_messages = build_slack_blocks(creds, rows, show, enrich, failed, args, generated)
+        n_reply = sum(1 for r in rows if r[4] == "REPLY")
+        fallback = f"📬 Inbox digest — {n_reply} replies across {len(creds)} accounts"
+        print(send_slack_bot(blocks_messages, fallback))
     if args.email:
-        print(send_email(report))
+        html = build_html(creds, rows, show, enrich, failed, args, generated)
+        print(send_email(report, html))
 
 
 if __name__ == "__main__":
